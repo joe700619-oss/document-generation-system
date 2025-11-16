@@ -1,6 +1,6 @@
-import os
 from docx import Document
 from datetime import datetime
+import os
 
 import json
 from sqlalchemy.orm import sessionmaker
@@ -20,15 +20,16 @@ def add_sample_data(session):
     # 檢查客戶是否已存在
     if session.query(ClientIndex).filter_by(unified_number="12345678").first() is None:
         client_a = ClientIndex(
-            name="A 科技股份有限公司",
+            name="ABC科技股份有限公司",
             unified_number="12345678",
             current_address="臺北市信義區忠孝東路 100 號 5 樓",
-            legal_rep="王小明"
+            # 刪除 new_address 欄位，它應該來自 UserInput
+            legal_rep="joe huang"
         )
         session.add(client_a)
-        print("✅ 客戶 A 科技股份有限公司已添加到會話。")
+        print("✅ 客戶 ABC科技股份有限公司已添加到會話。")
     else:
-        print("👉 客戶 A 科技股份有限公司 (12345678) 已存在，跳過添加。")
+        print("👉 客戶 ABC科技股份有限公司 (12345678) 已存在，跳過添加。")
 
     print("\n--- 2. 檢查並添加業務需求範例數據 ---")
     if session.query(DocTypeRequirement).filter_by(business_name="地址變更").first() is None:
@@ -94,7 +95,7 @@ def query_and_display_data(session):
     print("====================================")
 
     # 查詢客戶
-    client = session.query(ClientIndex).filter_by(name="A 科技股份有限公司").first()
+    client = session.query(ClientIndex).filter_by(name="ABC科技股份有限公司").first()
     print(f"【客戶名稱】: {client.name}, 統一編號: {client.unified_number}")
 
     # 查詢業務需求
@@ -112,15 +113,39 @@ def query_and_display_data(session):
 
 # ... (在 add_sample_data 和 query_and_display_data 之後新增)
 
+# --- 輔助函式：處理替換邏輯 ---
+def replace_text_in_paragraph(paragraph, data_map):
+    """
+    對單個段落執行所有變數替換，支援處理佔位符被拆分到多個 Run 的情況。
+    """
+    full_text = "".join([run.text for run in paragraph.runs])
+
+    # 執行替換
+    new_text = full_text
+    is_replaced = False
+
+    for old_key, new_value in data_map.items():
+        if old_key in new_text:
+            new_text = new_text.replace(old_key, str(new_value))
+            is_replaced = True
+
+    if is_replaced:
+        # 關鍵步驟：清空所有 Run 並將替換後的完整文字寫入一個新的 Run
+        # 雖然會丟失原始 Run 的格式，但確保了替換成功
+        for run in paragraph.runs:
+            run.text = ""
+
+        # 寫入新的 Run
+        if paragraph.runs:
+            paragraph.runs[0].text = new_text
+        else:
+            paragraph.add_run(new_text)
+
+
+# --- 核心函式：包含表格處理 ---
 def generate_document(session, client_name, business_name, user_input_data):
     """
     根據使用者輸入和資料庫資訊，生成文件。
-
-    Args:
-        session: SQLAlchemy 資料庫會話。
-        client_name (str): 客戶名稱。
-        business_name (str): 業務類型名稱 (如: 地址變更)。
-        user_input_data (dict): 使用者輸入的變數 (如: {'NEW_ADDRESS': '新地址'})。
     """
     print(f"\n--- 開始生成 {client_name} 的 {business_name} 文件 ---")
 
@@ -138,40 +163,41 @@ def generate_document(session, client_name, business_name, user_input_data):
     data_map = {}
 
     for var in template_vars:
-        key = var.placeholder_key.strip('<>').upper()  # 提取 KEY (如: COMPANY_NAME)
+        key = var.placeholder_key.strip('<>').upper()
 
         if var.variable_source.startswith("ClientIndex"):
-            # 數據來自客戶資料表
             attr_name = var.variable_source.split('.')[-1]
             data_map[var.placeholder_key] = getattr(client, attr_name)
 
         elif var.variable_source.startswith("UserInput"):
-            # 數據來自使用者輸入
             input_key = var.variable_source.split('.')[-1].upper()
             data_map[var.placeholder_key] = user_input_data.get(input_key, f"[缺少輸入: {input_key}]")
 
-        # 處理 OLD_ADDRESS (我們需要從 client 中獲取舊地址)
+        # 處理 OLD_ADDRESS 和 LEGAL_REP (確保數據進入 data_map，雖然上面邏輯已涵蓋，但作為二次確認)
         if var.placeholder_key == "<<OLD_ADDRESS>>":
-            data_map[var.placeholder_key] = client.current_address  # 舊地址就是客戶當前的地址
+            data_map[var.placeholder_key] = client.current_address
 
-        # 處理負責人 (我們需要負責人資訊)
         if var.placeholder_key == "<<LEGAL_REP>>":
             data_map[var.placeholder_key] = client.legal_rep
 
     # 4. 執行 Word 範本替換
     try:
-        # 載入範本
         base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         template_path = os.path.join(base_dir, 'templates', template_filename)
         document = Document(template_path)
 
-        # 遍歷段落進行替換
+        # A. 替換頂層段落的文字
         for p in document.paragraphs:
-            for old_key, new_value in data_map.items():
-                if old_key in p.text:
-                    p.text = p.text.replace(old_key, str(new_value))
+            replace_text_in_paragraph(p, data_map)
 
-        # 5. 儲存新文件到客戶資料夾
+        # B. 替換表格內的文字
+        for table in document.tables:
+            for row in table.rows:
+                for cell in row.cells:
+                    for p in cell.paragraphs:
+                        replace_text_in_paragraph(p, data_map)
+
+        # 5. 儲存新文件
         output_dir = os.path.join(base_dir, 'clients', client_name)
         if not os.path.exists(output_dir):
             os.makedirs(output_dir)
@@ -190,9 +216,13 @@ def generate_document(session, client_name, business_name, user_input_data):
 
 # --- 4. 修改主程式入口 (main.py 的 if __name__ == "__main__": 區塊) ---
 
+# --- 4. 系統主入口 ---
+
 if __name__ == "__main__":
     with SessionLocal() as session:
         # 1. 添加數據 (確保範例數據存在)
+        # 由於我們已修正了 add_sample_data 中的 new_address 錯誤，
+        # 且希望重新寫入完整的客戶資料，這一步是必要的。
         add_sample_data(session)
 
         # 2. 查詢數據 (可選，用於確認)
@@ -206,7 +236,7 @@ if __name__ == "__main__":
 
         generate_document(
             session=session,
-            client_name="A 科技股份有限公司",
+            client_name="ABC科技股份有限公司",  # <--- 最終修正：使用 DB 中正確的客戶名稱
             business_name="地址變更",
             user_input_data=user_input
         )
