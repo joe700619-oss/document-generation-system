@@ -1,0 +1,10 @@
+# 資料處理與資料庫 ORM
+pandas
+SQLAlchemy
+
+# 文件處理 (以 Word 為例)
+python-docx
+
+# 環境與 AI 互動 (未來步驟會用到)
+# dotenv
+# langchain
